@@ -1,0 +1,1 @@
+const e='<div class="sw-profile-index-privacy-preferences"> <sw-settings-usage-data-profile-consent /> </div>',n=Shopwell.Component.wrapComponentConfig({name:"sw-profile-index-privacy-preferences",template:e});export{n as default};
