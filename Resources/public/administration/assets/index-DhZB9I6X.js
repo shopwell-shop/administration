@@ -1,0 +1,1 @@
+import{t}from"./sw-condition-generic-Co9t5Z4k.js";const{Mixin:i}=Shopwell,{getPlaceholderSnippet:n}=Shopwell.Utils.genericRuleCondition,l={template:t,inheritAttrs:!1,mixins:[i.getByName("generic-condition")],methods:{getPlaceholder(e){return this.$t(n(e))}}};export{l as default};
