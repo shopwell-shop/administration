@@ -1,0 +1,1 @@
+import{p as t,a as p}from"./administration-CUYWdjTd.js";const a=Shopwell.Component.wrapComponentConfig({template:"<slot />",inheritAttrs:!1,setup(s,{attrs:e}){return Object.keys(e).forEach(o=>t(Shopwell.Utils.string.camelCase(o),p(()=>e[o]))),{}}});export{a as default};
