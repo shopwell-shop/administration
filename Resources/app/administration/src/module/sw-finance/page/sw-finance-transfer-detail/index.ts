@@ -4,8 +4,9 @@
 import { defineComponent } from 'vue';
 import type CriteriaType from 'src/core/data/criteria.data';
 import type RepositoryType from 'src/core/data/repository.data';
-import template from './sw-payment-transfer-detail.html.twig';
-import './sw-payment-transfer-detail.scss';
+import template from './sw-finance-transfer-detail.html.twig';
+import './sw-finance-transfer-detail.scss';
+import { DECIDABLE_STATE, providerLabelKey, transferStateLabelKey } from '../../service/payment-transfer.api.service';
 import {
     PAYMENT_TRANSFER_STATE_MACHINE,
     createPaymentStateCriteria,
@@ -13,7 +14,7 @@ import {
     findPaymentStateVariant,
     formatPaymentAmount,
     formatPayload,
-} from '../../service/payment-gateway.api.service';
+} from '../../../sw-payment/service/payment-gateway.api.service';
 
 const { Criteria } = Shopwell.Data;
 
@@ -23,7 +24,7 @@ type PaymentTransfer = EntitySchema.Entity<'payment_transfer'>;
 export default defineComponent({
     template,
 
-    inject: ['repositoryFactory'],
+    inject: ['repositoryFactory', 'acl'],
 
     props: {
         transferId: {
@@ -36,11 +37,15 @@ export default defineComponent({
         transfer: PaymentTransfer | null;
         isLoading: boolean;
         transferStates: EntityCollection<'state_machine_state'> | null;
+        showApproveModal: boolean;
+        showRejectModal: boolean;
     } {
         return {
             transfer: null,
             isLoading: false,
             transferStates: null,
+            showApproveModal: false,
+            showRejectModal: false,
         };
     },
 
@@ -74,6 +79,21 @@ export default defineComponent({
         },
 
         /**
+         * The interface name is a snippet key declared by the server.
+         */
+        providerLabel(): string {
+            const provider = this.transfer?.provider;
+
+            if (!provider) {
+                return '–';
+            }
+
+            const key = providerLabelKey(provider);
+
+            return this.$te(key) ? (this.$t(key)) : provider;
+        },
+
+        /**
          * Wechat is the only channel that hands a single use `package_info` to the shopper. The
          * existence of that value is all the administration may know - see the template.
          */
@@ -89,8 +109,45 @@ export default defineComponent({
             return Boolean(this.transfer?.failureCode || this.transfer?.failureReason);
         },
 
+        /**
+         * The note is what the creator wrote for the approver and never travels to the channel.
+         */
+        note(): string {
+            const metadata = this.transfer?.metadata as { note?: string } | null;
+
+            return metadata?.note ?? '';
+        },
+
+        /**
+         * A rejection is final and the reason is the only record of it, so it gets its own line right
+         * next to the failure card instead of being buried in the metadata json.
+         */
+        rejectReason(): string {
+            const metadata = this.transfer?.metadata as { rejectReason?: string } | null;
+
+            return metadata?.rejectReason ?? '';
+        },
+
         metadataJson(): string {
             return formatPayload(this.transfer?.metadata);
+        },
+
+        /**
+         * Only a `created` transfer may be released or rejected - everything else is on its way or done.
+         */
+        isDecidable(): boolean {
+            return this.transfer?.statusMachineState?.technicalName === DECIDABLE_STATE;
+        },
+
+        /**
+         * The privilege that moves money. Without it the detail page is a pure read view.
+         */
+        canApprove(): boolean {
+            return this.acl.can('payment_transfer.approver');
+        },
+
+        canDecide(): boolean {
+            return this.isDecidable && this.canApprove;
         },
     },
 
@@ -133,8 +190,33 @@ export default defineComponent({
             return this.loadTransfer();
         },
 
+        /**
+         * The name of a transfer state.
+         *
+         * The snippet of this module wins over the name the state machine carries: that translation was
+         * written for the payment gateway and calls a `created` payout `已创建`, while the finance pages
+         * ask the operator to submit it. A state the administration does not translate falls back to the
+         * name of the machine instead of showing a key.
+         */
+        stateLabelOf(technicalName: string | null | undefined, fallback: string): string {
+            if (!technicalName) {
+                return fallback;
+            }
+
+            const key = transferStateLabelKey(technicalName);
+
+            return this.$te(key) ? this.$t(key) : fallback;
+        },
+
         transferStateLabel(stateId: string): string {
-            return findPaymentStateLabel(this.transferStates ?? [], stateId) as string;
+            const state = [...(this.transferStates ?? [])].find((entry) => entry.id === stateId) as
+                | EntitySchema.Entity<'state_machine_state'>
+                | undefined;
+
+            return this.stateLabelOf(
+                state?.technicalName,
+                findPaymentStateLabel(this.transferStates ?? [], stateId) as string,
+            );
         },
 
         transferStateVariant(stateId: string): string {
@@ -150,6 +232,41 @@ export default defineComponent({
          */
         formatDateOrDash(value: string | null | undefined): string {
             return value ? this.dateFilter(value) : '–';
+        },
+
+        onApprove(): void {
+            if (!this.canDecide) {
+                return;
+            }
+
+            this.showApproveModal = true;
+        },
+
+        onReject(): void {
+            if (!this.canDecide) {
+                return;
+            }
+
+            this.showRejectModal = true;
+        },
+
+        onCloseApproveModal(): void {
+            this.showApproveModal = false;
+        },
+
+        onCloseRejectModal(): void {
+            this.showRejectModal = false;
+        },
+
+        /**
+         * The row on screen is stale the moment a decision is booked - a state, the submit counter, a
+         * failure reason - so it is read again instead of being patched locally.
+         */
+        onTransferDecided(): void {
+            this.showApproveModal = false;
+            this.showRejectModal = false;
+
+            void this.loadTransfer();
         },
     },
 });

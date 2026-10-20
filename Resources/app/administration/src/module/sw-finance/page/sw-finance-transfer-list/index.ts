@@ -4,15 +4,16 @@
 import { defineComponent } from 'vue';
 import type CriteriaType from 'src/core/data/criteria.data';
 import type RepositoryType from 'src/core/data/repository.data';
-import template from './sw-payment-transfer-list.html.twig';
-import './sw-payment-transfer-list.scss';
+import template from './sw-finance-transfer-list.html.twig';
+import './sw-finance-transfer-list.scss';
+import { DECIDABLE_STATE, providerLabelKey, transferStateLabelKey } from '../../service/payment-transfer.api.service';
 import {
     PAYMENT_TRANSFER_STATE_MACHINE,
     createPaymentStateCriteria,
     findPaymentStateLabel,
     findPaymentStateVariant,
     formatPaymentAmount,
-} from '../../service/payment-gateway.api.service';
+} from '../../../sw-payment/service/payment-gateway.api.service';
 
 const { Criteria } = Shopwell.Data;
 const { Mixin } = Shopwell;
@@ -51,6 +52,17 @@ function transferFilterFactory(vm: unknown): TransferFilterFactory {
     return (vm as { filterFactory: TransferFilterFactory }).filterFactory;
 }
 
+/**
+ * The list of transfer requests - the workbench of the operator who decides about payouts.
+ *
+ * Two facts drive the whole page:
+ *
+ *  1. **Booking and releasing are two steps.** The "New transfer request" button only books an intent;
+ *     money moves when an approver confirms a row, and only a row that is still `created` can be
+ *     confirmed. That is why the actions are per row and not in the smart bar.
+ *  2. **Approving and rejecting are different privileges from viewing.** A reader never sees an action
+ *     that would move money - hidden in the UI *and* refused by the acl of the endpoint.
+ */
 // eslint-disable-next-line sw-deprecation-rules/private-feature-declarations
 export default defineComponent({
     template,
@@ -68,6 +80,9 @@ export default defineComponent({
         defaultFilters: string[];
         storeKey: string;
         activeFilterNumber: number;
+        showCreateModal: boolean;
+        transferToApprove: PaymentTransfer | null;
+        transferToReject: PaymentTransfer | null;
     } {
         return {
             transfers: null,
@@ -78,6 +93,9 @@ export default defineComponent({
             defaultFilters: DEFAULT_FILTERS,
             storeKey: 'grid.filter.payment_transfer',
             activeFilterNumber: 0,
+            showCreateModal: false,
+            transferToApprove: null,
+            transferToReject: null,
         };
     },
 
@@ -101,13 +119,30 @@ export default defineComponent({
         },
 
         /**
-         * The recipient is part of the listing, the transfer itself only stores the id.
+         * Booking a request is a separate privilege: a reader may see the list and still not create one.
+         */
+        canCreate(): boolean {
+            return this.acl.can('payment_transfer.creator');
+        },
+
+        /**
+         * The privilege that moves money. Nothing on this page submits or rejects a transfer without it.
+         */
+        canApprove(): boolean {
+            return this.acl.can('payment_transfer.approver');
+        },
+
+        /**
+         * The recipient is part of the listing, the transfer itself only stores the id. The app is
+         * associated as well: a payout is released for a specific merchant account.
          */
         criteria(): CriteriaType {
             const criteria = new Criteria(this.page, this.limit);
             criteria.setTerm(this.term ?? '');
             criteria.addSorting(Criteria.sort(this.sortBy ?? 'createdAt', this.sortDirection, this.naturalSorting));
             criteria.addAssociation('recipient');
+            criteria.addAssociation('paymentApp');
+            criteria.addAssociation('statusMachineState');
 
             return criteria;
         },
@@ -117,36 +152,36 @@ export default defineComponent({
                 'transfer-no-filter': {
                     property: 'transferNo',
                     type: 'string-filter',
-                    label: this.$t('sw-payment.transfer.filters.transferNoFilter.label'),
-                    placeholder: this.$t('sw-payment.transfer.filters.transferNoFilter.placeholder'),
+                    label: this.$t('sw-finance.transfer.filters.transferNoFilter.label'),
+                    placeholder: this.$t('sw-finance.transfer.filters.transferNoFilter.placeholder'),
                     criteriaFilterType: 'equalsAny',
                 },
                 'out-no-filter': {
                     property: 'outNo',
                     type: 'string-filter',
-                    label: this.$t('sw-payment.transfer.filters.outNoFilter.label'),
-                    placeholder: this.$t('sw-payment.transfer.filters.outNoFilter.placeholder'),
+                    label: this.$t('sw-finance.transfer.filters.outNoFilter.label'),
+                    placeholder: this.$t('sw-finance.transfer.filters.outNoFilter.placeholder'),
                     criteriaFilterType: 'equalsAny',
                 },
                 'channel-filter': {
                     property: 'channel',
                     type: 'string-filter',
-                    label: this.$t('sw-payment.transfer.filters.channelFilter.label'),
-                    placeholder: this.$t('sw-payment.transfer.filters.channelFilter.placeholder'),
+                    label: this.$t('sw-finance.transfer.filters.channelFilter.label'),
+                    placeholder: this.$t('sw-finance.transfer.filters.channelFilter.placeholder'),
                     criteriaFilterType: 'equalsAny',
                 },
                 'provider-filter': {
                     property: 'provider',
                     type: 'string-filter',
-                    label: this.$t('sw-payment.transfer.filters.providerFilter.label'),
-                    placeholder: this.$t('sw-payment.transfer.filters.providerFilter.placeholder'),
+                    label: this.$t('sw-finance.transfer.filters.providerFilter.label'),
+                    placeholder: this.$t('sw-finance.transfer.filters.providerFilter.placeholder'),
                     criteriaFilterType: 'equalsAny',
                 },
                 'state-filter': {
                     property: 'statusId',
                     type: 'multi-select-filter',
-                    label: this.$t('sw-payment.transfer.filters.stateFilter.label'),
-                    placeholder: this.$t('sw-payment.transfer.filters.stateFilter.placeholder'),
+                    label: this.$t('sw-finance.transfer.filters.stateFilter.label'),
+                    placeholder: this.$t('sw-finance.transfer.filters.stateFilter.placeholder'),
                     options: this.stateFilterOptions,
                     valueProperty: 'id',
                     labelProperty: 'name',
@@ -161,12 +196,19 @@ export default defineComponent({
         /**
          * The status of a transfer is a plain id, the states of the machine are read once so the
          * column and the filter can render their names.
+         *
+         * The name comes from the snippet of this module first: the state machine carries translations
+         * of the payment gateway (`打款成功`), which are not the words the finance pages use for the same
+         * state.
          */
         stateFilterOptions(): Array<{ id: string; name: string }> {
             return [...(this.states ?? [])].map((state: StateMachineState) => {
                 return {
                     id: state.id,
-                    name: state.translated?.name || state.name || state.technicalName,
+                    name: this.stateLabelOf(
+                        state.technicalName,
+                        state.translated?.name || state.name || state.technicalName,
+                    ),
                 };
             });
         },
@@ -175,49 +217,58 @@ export default defineComponent({
             return this.activeFilterNumber > 0 || Boolean(this.isValidTerm(this.term ?? ''));
         },
 
+        /**
+         * The data columns of the prd in its order. The last column - the actions - is a slot of the
+         * listing and deliberately not a column: it carries no data of the transfer.
+         */
         transferColumns(): Array<Record<string, unknown>> {
             return [
                 {
                     property: 'transferNo',
-                    label: 'sw-payment.transfer.list.columnTransferNo',
-                    routerLink: 'sw.payment.transferDetail',
+                    label: 'sw-finance.transfer.list.columnTransferNo',
+                    routerLink: 'sw.finance.transferDetail',
                     primary: true,
                     allowResize: true,
                 },
                 {
                     property: 'outNo',
-                    label: 'sw-payment.transfer.list.columnOutNo',
+                    label: 'sw-finance.transfer.list.columnOutNo',
                     allowResize: true,
                 },
                 {
                     property: 'recipientId',
-                    label: 'sw-payment.transfer.list.columnRecipient',
+                    label: 'sw-finance.transfer.list.columnRecipient',
                     allowResize: true,
                 },
                 {
                     property: 'provider',
-                    label: 'sw-payment.transfer.list.columnProvider',
+                    label: 'sw-finance.transfer.list.columnProvider',
                     allowResize: true,
                 },
                 {
                     property: 'channel',
-                    label: 'sw-payment.transfer.list.columnChannel',
+                    label: 'sw-finance.transfer.list.columnChannel',
                     allowResize: true,
                 },
                 {
                     property: 'amount',
-                    label: 'sw-payment.transfer.list.columnAmount',
+                    label: 'sw-finance.transfer.list.columnAmount',
                     align: 'right',
                     allowResize: true,
                 },
                 {
                     property: 'statusId',
-                    label: 'sw-payment.transfer.list.columnState',
+                    label: 'sw-finance.transfer.list.columnState',
+                    allowResize: true,
+                },
+                {
+                    property: 'failureCode',
+                    label: 'sw-finance.transfer.list.columnFailure',
                     allowResize: true,
                 },
                 {
                     property: 'createdAt',
-                    label: 'sw-payment.transfer.list.columnCreatedAt',
+                    label: 'sw-finance.transfer.list.columnCreatedAt',
                     allowResize: true,
                 },
             ];
@@ -270,8 +321,30 @@ export default defineComponent({
             void this.getList();
         },
 
+        /**
+         * The name of a transfer state.
+         *
+         * The snippet of this module wins over the name the state machine carries: that translation was
+         * written for the payment gateway and calls a `created` payout `已创建`, while the finance pages
+         * ask the operator to submit it. A state the administration does not translate falls back to the
+         * name of the machine instead of showing a key.
+         */
+        stateLabelOf(technicalName: string | null | undefined, fallback: string): string {
+            if (!technicalName) {
+                return fallback;
+            }
+
+            const key = transferStateLabelKey(technicalName);
+
+            return this.$te(key) ? this.$t(key) : fallback;
+        },
+
         transferStateLabel(stateId: string): string {
-            return findPaymentStateLabel(this.states ?? [], stateId) as string;
+            const state = [...(this.states ?? [])].find((entry) => entry.id === stateId) as
+                | StateMachineState
+                | undefined;
+
+            return this.stateLabelOf(state?.technicalName, findPaymentStateLabel(this.states ?? [], stateId) as string);
         },
 
         transferStateVariant(stateId: string): string {
@@ -280,6 +353,21 @@ export default defineComponent({
 
         formatAmount(amount: number, currency: string): string {
             return formatPaymentAmount(amount, currency);
+        },
+
+        /**
+         * The interface name is a snippet key declared by the server, so an interface this
+         * administration does not translate falls back to its technical name instead of showing a key.
+         */
+        providerLabel(provider: string | null): string {
+            if (!provider) {
+                return '-';
+            }
+
+            const key = providerLabelKey(provider);
+            const translated = this.$te(key) ? (this.$t(key)) : null;
+
+            return translated || provider;
         },
 
         /**
@@ -294,8 +382,96 @@ export default defineComponent({
             return item.recipient.holderName || item.recipient.providerAccountId || '-';
         },
 
+        /**
+         * The failure column carries three different stories and has to tell them apart: a rejection is
+         * an operator decision, a failure is a channel answer, and a return is money that came back.
+         */
+        failureLabel(item: PaymentTransfer): string {
+            const rejectReason = (item.metadata as { rejectReason?: string } | null)?.rejectReason;
+
+            if (rejectReason) {
+                return `${this.$t('sw-finance.transfer.actions.cancel')}: ${rejectReason}`;
+            }
+
+            if (item.failureReason) {
+                return item.failureReason;
+            }
+
+            return item.failureCode || '';
+        },
+
+        /**
+         * Only a transfer that is still `created` may be released or rejected - everything else is
+         * already on its way or finished, and the server refuses it with a 409 anyway.
+         */
+        isDecidable(item: PaymentTransfer): boolean {
+            return item.statusMachineState?.technicalName === DECIDABLE_STATE;
+        },
+
+        /**
+         * The visibility matrix of the action column: state AND privilege.
+         */
+        canDecide(item: PaymentTransfer): boolean {
+            return this.isDecidable(item) && this.canApprove;
+        },
+
         formatDateOrDash(value: string | null): string {
             return value ? this.dateFilter(value) : '–';
+        },
+
+        onOpenCreateModal(): void {
+            this.showCreateModal = true;
+        },
+
+        onCloseCreateModal(): void {
+            this.showCreateModal = false;
+        },
+
+        /**
+         * The new row is not patched into the local collection: the server decides its number, its
+         * state and its amount in the smallest unit, so the list is asked again.
+         */
+        onTransferCreated(): void {
+            this.showCreateModal = false;
+            this.page = 1;
+
+            void this.getList();
+        },
+
+        onApprove(item: PaymentTransfer): void {
+            if (!this.canDecide(item)) {
+                return;
+            }
+
+            this.transferToApprove = item;
+        },
+
+        onReject(item: PaymentTransfer): void {
+            if (!this.canDecide(item)) {
+                return;
+            }
+
+            this.transferToReject = item;
+        },
+
+        onCloseApproveModal(): void {
+            this.transferToApprove = null;
+        },
+
+        onCloseRejectModal(): void {
+            this.transferToReject = null;
+        },
+
+        /**
+         * Both decisions change the row - a state, the submit counter, the failure reason - and both are
+         * reported by the modal through its own notice. The list only refreshes so the row shows what
+         * the server actually booked.
+         */
+        onTransferDecided(): void {
+            this.transferToApprove = null;
+            this.transferToReject = null;
+
+            void this.getList();
         },
     },
 });
