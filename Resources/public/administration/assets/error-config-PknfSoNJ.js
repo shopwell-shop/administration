@@ -1,0 +1,1 @@
+const e={"sw.customer.detail.base":{customer:["gender","name","email","groupId","salesChannelId","customerNumber","password","vatIds","company","passwordNew","passwordConfirm","convert"]}};export{e};
